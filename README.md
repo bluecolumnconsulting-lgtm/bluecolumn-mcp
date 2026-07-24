@@ -1,8 +1,18 @@
-# bluecolumn-mcp
+# 🧠 BlueColumn MCP Server
+
+> **Give Claude Desktop, Cursor, and any MCP-compatible agent persistent memory across sessions.**
+
+[![npm version](https://img.shields.io/npm/v/bluecolumn-mcp)](https://www.npmjs.com/package/bluecolumn-mcp)
+[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![BlueColumn](https://img.shields.io/badge/BlueColumn-API-3B82F6)](https://bluecolumn.ai)
+
+**2-minute setup.** Zero-config. Audio-native. Works with every MCP client.
+
+---
 
 MCP server for [BlueColumn](https://bluecolumn.ai) — persistent semantic memory for AI agents.
 
-Give any MCP-compatible agent (Claude Desktop, LangChain, AutoGen, CrewAI) the ability to remember, recall, and store observations across sessions.
+Give any MCP-compatible agent (Claude Desktop, Cursor, Windsurf, LangChain, AutoGen, CrewAI) the ability to remember, recall, and store observations across sessions.
 
 ## Tools
 
@@ -41,44 +51,56 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 }
 ```
 
-Restart Claude Desktop. Your agent now has persistent memory.
+### 4. Restart Claude
 
-## Usage
+Done. Claude now remembers everything you tell it to.
 
-Once configured, your agent can:
+## What Makes BlueColumn Different
 
+| Feature | BlueColumn MCP | Other MCP Memory Servers |
+|---------|---------------|--------------------------|
+| **Audio ingestion** | ✅ Native (transcribe + store) | ❌ Text only |
+| **Plain English recall** | ✅ "What did we decide about pricing?" | ❌ Keyword/vector only |
+| **Setup time** | ~2 minutes | ~10-30 minutes |
+| **Cloud managed** | ✅ No infra to run | ⚠️ Most require local DB |
+| **Namespace isolation** | ✅ Built-in per key | ⚠️ Manual |
+
+## Examples
+
+### Store project context
 ```
-Remember this: our API uses Voyage AI embeddings at 512 dimensions
-→ Uses the `remember` tool automatically
-
-What embedding model does our API use?
-→ Uses the `recall` tool to query memory
-
-Note: user prefers bullet points over paragraphs
-→ Uses the `note` tool for quick observations
-```
-
-## Example with LangChain
-
-```python
-from langchain_mcp import MCPToolkit
-
-toolkit = MCPToolkit(server_name="bluecolumn")
-tools = toolkit.get_tools()
-# Tools: remember, recall, note — all backed by BlueColumn
+Remember: We're building a React component library called Aether with Tailwind CSS v4.
 ```
 
-## Pricing
+### Recall across sessions (new conversation)
+```
+What project was I working on? What was my tech stack?
+```
+→ *Claude recalls: "You're building Aether, a React component library with Tailwind CSS v4"*
 
-| Plan | Price | Audio | Queries |
-|---|---|---|---|
-| Free | $0 | 60 min/mo | 100/mo |
-| Developer | $29/mo | 600 min | 2,000 |
-| Builder | $79/mo | 2,000 min | 8,000 |
-| Scale | $249/mo | 6,000 min | 20,000 |
+### Store audio notes
+Record a voice memo → BlueColumn transcribes it → Claude remembers it.
 
-## Links
+## Advanced
 
-- [bluecolumn.ai](https://bluecolumn.ai)
-- [API Documentation](https://bluecolumn.ai/docs)
-- [GitHub](https://github.com/bluecolumn/bluecolumn-mcp)
+### Custom namespace
+```json
+{
+  "mcpServers": {
+    "bluecolumn": {
+      "command": "bluecolumn-mcp",
+      "env": {
+        "BLUECOLUMN_API_KEY": "bc_live_YOUR_KEY",
+        "BLUECOLUMN_NAMESPACE": "my_project"
+      }
+    }
+  }
+}
+```
+
+### Multiple environments
+Use different namespaces for work, personal, and side projects. Each stays isolated.
+
+---
+
+**[Sign up free →](https://bluecolumn.ai)** · **[Docs](https://bluecolumn.ai/docs)** · **[GitHub Issues](https://github.com/bluecolumnconsulting-lgtm/bluecolumn-mcp/issues)**
