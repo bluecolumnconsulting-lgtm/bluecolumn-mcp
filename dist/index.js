@@ -1,407 +1,240 @@
 #!/usr/bin/env node
-// ---------------------------------------------------------------------------
-// mcp-bluecolumn — MCP Server for BlueColumn Memory Infrastructure
-//
-// Exposes BlueColumn's semantic memory as standard MCP tools and resources.
-// Compatible with Claude Desktop, Claude Code, Cursor, OpenClaw, and any
-// MCP-compatible client.
-//
-// Usage:
-//   npx mcp-bluecolumn --api-key=bc_key_xxxx
-//   BLUECOLUMN_API_KEY=bc_key_xxxx npx mcp-bluecolumn
-//
-// Published: npmjs.com/package/mcp-bluecolumn
-// Repo:      github.com/bluecolumn/mcp-bluecolumn
-// ---------------------------------------------------------------------------
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { CallToolRequestSchema, ListToolsRequestSchema, ListResourcesRequestSchema, ReadResourceRequestSchema, ListPromptsRequestSchema, GetPromptRequestSchema, } from "@modelcontextprotocol/sdk/types.js";
-import { z } from "zod";
-import fetch from "cross-fetch";
+import { CallToolRequestSchema, ListToolsRequestSchema, } from "@modelcontextprotocol/sdk/types.js";
 import { createHash } from "node:crypto";
-function loadConfig() {
-    const env = process.env;
-    // --api-key=xxx or BLUECOLUMN_API_KEY
-    const apiKey = (() => {
-        const idx = process.argv.findIndex((a) => a.startsWith("--api-key="));
-        if (idx !== -1)
-            return process.argv[idx].split("=", 2)[1];
-        return env.BLUECOLUMN_API_KEY ?? "";
-    })();
-    if (!apiKey) {
-        console.error("Error: API key required. Pass --api-key=bc_key_xxxx or set BLUECOLUMN_API_KEY env var.");
-        process.exit(1);
-    }
-    return {
-        apiKey,
-        baseUrl: (env.BLUECOLUMN_BASE_URL ?? "https://api.bluecolumn.ai/v1").replace(/\/+$/, ""),
-        // The streaming gateway lives at the platform root (/streaming-audio),
-        // not under /v1. Derived from baseUrl unless explicitly overridden.
-        streamingBaseUrl: env.BLUECOLUMN_STREAMING_BASE_URL ??
-            (env.BLUECOLUMN_BASE_URL ?? "https://api.bluecolumn.ai/v1")
-                .replace(/\/+$/, "")
-                .replace(/\/v1$/, ""),
-        defaultAgentId: env.BLUECOLUMN_DEFAULT_AGENT_ID,
-    };
+const BASE_URL = "https://xkjkwqbfvkswwdmbtndo.supabase.co/functions/v1";
+const NAMESPACE = process.env.BLUECOLUMN_NAMESPACE || "nl";
+const API_KEY = process.env.BLUECOLUMN_API_KEY;
+if (!API_KEY) {
+    console.error("Error: BLUECOLUMN_API_KEY environment variable is required.");
+    console.error("Get your free API key at https://bluecolumn.ai");
+    process.exit(1);
 }
-const config = loadConfig();
-async function apiCall(opts) {
-    const url = `${opts.baseUrl ?? config.baseUrl}${opts.path}`;
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), opts.timeoutMs ?? 30_000);
-    try {
-        const response = await fetch(url, {
-            method: opts.method,
-            headers: {
-                "Content-Type": "application/json",
-                Authorization: `Bearer ${config.apiKey}`,
-                "User-Agent": "mcp-bluecolumn/v1.1.0",
-            },
-            body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
-            signal: controller.signal,
-        });
-        clearTimeout(timeout);
-        const data = await response.json();
-        if (!response.ok) {
-            const errMsg = data?.error ?? `HTTP ${response.status}`;
-            throw new Error(`${errMsg} (${response.status})`);
-        }
-        return data;
+const headers = {
+    "Authorization": `Bearer ${API_KEY}`,
+    "Content-Type": "application/json",
+};
+async function callBlueColumn(endpoint, body) {
+    const res = await fetch(`${BASE_URL}/${endpoint}`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ namespace: NAMESPACE, ...body }),
+    });
+    if (!res.ok) {
+        const err = await res.text();
+        throw new Error(`BlueColumn API error (${res.status}): ${err}`);
     }
-    catch (err) {
-        clearTimeout(timeout);
-        if (err instanceof Error && err.name === "AbortError") {
-            throw new Error(`Request timed out after ${opts.timeoutMs ?? 30_000}ms`);
-        }
-        throw err;
-    }
+    return res.json();
 }
-// ---------------------------------------------------------------------------
-// Zod Schemas (input validation for tools)
-// ---------------------------------------------------------------------------
-const RememberSchema = z.object({
-    agent_id: z.string().min(1, "agent_id is required"),
-    content: z.string().min(1, "content is required").max(65536),
-    tags: z.array(z.string()).optional(),
-    metadata: z.record(z.unknown()).optional(),
-    ttl_seconds: z.number().int().positive().optional(),
-});
-const RecallSchema = z.object({
-    query: z.string().min(1, "query is required"),
-    agent_id: z.string().min(1, "agent_id is required"),
-    top_k: z.number().int().min(1).max(100).optional().default(10),
-    min_score: z.number().min(0).max(1).optional(),
-    tags: z.array(z.string()).optional(),
-    since: z.string().optional(),
-    until: z.string().optional(),
-});
-const ListSessionsSchema = z.object({
-    agent_id: z.string().min(1, "agent_id is required"),
-    limit: z.number().int().min(1).max(200).optional().default(25),
-    offset: z.number().int().min(0).optional().default(0),
-});
-const CreateSessionSchema = z.object({
-    agent_id: z.string().min(1, "agent_id is required"),
-    context: z.record(z.unknown()).optional(),
-    tags: z.array(z.string()).optional(),
-});
-const WriteNoteSchema = z.object({
-    from_agent_id: z.string().min(1, "from_agent_id is required"),
-    to_agent_id: z.string().optional(),
-    channel: z.string().optional(),
-    subject: z.string().optional(),
-    content: z.string().min(1, "content is required"),
-    persistent: z.boolean().optional(),
-});
-const ConverseSchema = z.object({
-    from_agent_id: z.string().min(1, "from_agent_id is required"),
-    to_agent_id: z.string().min(1, "to_agent_id is required"),
-    thread_id: z.string().optional(),
-    message_type: z
-        .enum(["request", "response", "broadcast", "error", "system"])
-        .optional(),
-    content: z.string().min(1, "content is required"),
-});
-const IngestAudioSchema = z.object({
-    agent_id: z.string().min(1, "agent_id is required"),
-    file_path: z.string().min(1, "file_path is required"),
-    tags: z.array(z.string()).optional(),
-    language: z.string().optional(),
-});
-const StreamingIngestSchema = z.object({
-    device_id: z.string().min(1, "device_id is required"),
-    audio_base64: z.string().min(1, "audio_base64 is required"),
-    format: z.enum(["wav", "opus", "pcm", "mp3"]).optional().default("wav"),
-    sample_rate: z.number().int().positive().optional(),
-    duration_seconds: z.number().positive().optional(),
-    idempotency_key: z
-        .string()
-        .regex(/^chunk_[a-zA-Z0-9_\-]+_\d+_[a-f0-9]{6,}$/, "expected chunk_<deviceId>_<timestamp>_<hash>")
-        .optional(),
-});
-const StreamingRecallSchema = z.object({
-    device_id: z.string().min(1, "device_id is required"),
-    query: z.string().min(1, "query is required"),
-});
-// ---------------------------------------------------------------------------
-// MCP Server
-// ---------------------------------------------------------------------------
-const server = new Server({
-    name: "mcp-bluecolumn",
-    version: "1.0.0",
-}, {
-    capabilities: {
-        resources: {},
-        tools: {},
-        prompts: {},
-    },
-});
-// ---------------------------------------------------------------------------
-// Tool Handlers
-// ---------------------------------------------------------------------------
+// Audio-intelligence layer (v1.1.0) — routed to the BlueColumn API. Override the
+// target with BLUECOLUMN_API_URL (defaults to the local FastAPI backend, which now
+// serves /v1/audio/*, /v1/calls/*, /v1/sound/*, /v1/music/*).
+const AUDIO_API_BASE = process.env.BLUECOLUMN_API_URL || "http://localhost:8000";
+async function callAudioApi(endpoint, body) {
+    const res = await fetch(`${AUDIO_API_BASE}${endpoint}`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+        const err = await res.text();
+        throw new Error(`BlueColumn Audio API error (${res.status}): ${err}`);
+    }
+    return res.json();
+}
+// Streaming gateway (v1.2.0) — POST /streaming-audio lives at the platform
+// root, not under /v1. Override with BLUECOLUMN_STREAMING_URL.
+const STREAMING_BASE_URL = process.env.BLUECOLUMN_STREAMING_URL || BASE_URL.replace(/\/v1$/, "");
+async function callStreamingApi(path, body) {
+    const res = await fetch(`${STREAMING_BASE_URL}${path}`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+        const err = await res.text();
+        throw new Error(`BlueColumn Streaming API error (${res.status}): ${err}`);
+    }
+    return res.json();
+}
+const server = new Server({ name: "bluecolumn-mcp", version: "1.2.0" }, { capabilities: { tools: {} } });
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: [
         {
             name: "remember",
-            description: "Store a new memory in BlueColumn. Automatically embeds and indexes the content for later semantic recall.",
+            description: "Store text, a document URL, or audio URL into BlueColumn persistent memory. Returns a summary, action items, and key topics automatically extracted by AI. Use when the user or agent wants to save information for future recall.",
             inputSchema: {
                 type: "object",
                 properties: {
-                    agent_id: {
+                    text: {
                         type: "string",
-                        description: "Your agent identifier",
+                        description: "Raw text content to store in memory",
                     },
-                    content: {
+                    audio_url: {
                         type: "string",
-                        description: "Memory content to store (up to 64K chars)",
+                        description: "URL to an audio file (will be transcribed via Whisper)",
                     },
-                    tags: {
-                        type: "array",
-                        items: { type: "string" },
-                        description: "Tags for filtering and categorization",
+                    file_url: {
+                        type: "string",
+                        description: "URL to a PDF or document",
                     },
-                    metadata: {
-                        type: "object",
-                        description: "Structured metadata to attach",
-                    },
-                    ttl_seconds: {
-                        type: "number",
-                        description: "Auto-expire the memory after N seconds",
+                    title: {
+                        type: "string",
+                        description: "Optional title for this memory (include date for best recall)",
                     },
                 },
-                required: ["agent_id", "content"],
+            },
+        },
+        {
+            name: "namespace",
+            description: "Get the BlueColumn namespace this MCP server is configured to write/read (default: nl).",
+            inputSchema: {
+                type: "object",
+                properties: {},
             },
         },
         {
             name: "recall",
-            description: "Semantically search stored memories using natural language. Returns the most relevant results ranked by similarity.",
+            description: "Query BlueColumn memory using natural language. Returns an AI-synthesized answer with source citations. Use when the agent needs to retrieve past information, answer questions about stored content, or get context from previous sessions.",
             inputSchema: {
                 type: "object",
+                required: ["q"],
                 properties: {
-                    query: {
+                    q: {
                         type: "string",
-                        description: "Natural-language query",
+                        description: "Natural language query to search memory",
                     },
-                    agent_id: {
+                },
+            },
+        },
+        {
+            name: "note",
+            description: "Store a lightweight agent observation as a searchable vector. Use when the agent wants to save a quick preference, decision, or observation without needing full document processing. Faster than remember for short notes.",
+            inputSchema: {
+                type: "object",
+                required: ["text"],
+                properties: {
+                    text: {
                         type: "string",
-                        description: "Agent to search within",
-                    },
-                    top_k: {
-                        type: "number",
-                        description: "Maximum number of results (default: 10)",
-                        default: 10,
-                    },
-                    min_score: {
-                        type: "number",
-                        description: "Minimum similarity score threshold (0–1)",
+                        description: "The observation or note to store (minimum 5 characters)",
                     },
                     tags: {
                         type: "array",
                         items: { type: "string" },
-                        description: "Filter by tags (AND logic)",
-                    },
-                    since: {
-                        type: "string",
-                        description: "ISO 8601 start date filter",
-                    },
-                    until: {
-                        type: "string",
-                        description: "ISO 8601 end date filter",
+                        description: "Optional tags for filtering (e.g. ['preference', 'user-123'])",
                     },
                 },
-                required: ["query", "agent_id"],
             },
         },
         {
-            name: "list_sessions",
-            description: "Browse conversation sessions for an agent with pagination.",
+            name: "audio_ingest",
+            description: "NEW (Audio Intelligence): Ingest audio (calls, voice notes, podcasts, music) and extract semantic memory using the audio-intelligence layer. Requires BLUECOLUMN_API_URL to point at the BlueColumn API.",
             inputSchema: {
                 type: "object",
+                required: ["audio_url", "source_type", "customer_id"],
                 properties: {
-                    agent_id: {
+                    audio_url: { type: "string", description: "URL of the audio file" },
+                    source_type: {
                         type: "string",
-                        description: "Agent to list sessions for",
+                        enum: ["call", "voice_note", "podcast", "meeting", "music", "environmental"],
                     },
-                    limit: {
-                        type: "number",
-                        description: "Max sessions to return (default: 25)",
-                        default: 25,
-                    },
-                    offset: {
-                        type: "number",
-                        description: "Pagination offset",
-                        default: 0,
-                    },
+                    customer_id: { type: "string" },
+                    metadata: { type: "object" },
                 },
-                required: ["agent_id"],
             },
         },
         {
-            name: "create_session",
-            description: "Start a new conversation session for an agent with optional context and tags.",
+            name: "call_prepare",
+            description: "NEW (Audio Intelligence): Get memory context before a voice call starts.",
             inputSchema: {
                 type: "object",
+                required: ["customer_id"],
                 properties: {
-                    agent_id: {
-                        type: "string",
-                        description: "Your agent identifier",
-                    },
-                    context: {
-                        type: "object",
-                        description: "Initial session context object",
-                    },
-                    tags: {
+                    customer_id: { type: "string" },
+                    include: {
                         type: "array",
-                        items: { type: "string" },
-                        description: "Session tags",
+                        items: {
+                            enum: ["memories", "relationship_summary", "unresolved_items", "suggested_opening", "preferred_delivery"],
+                        },
                     },
                 },
-                required: ["agent_id"],
             },
         },
         {
-            name: "write_note",
-            description: "Write an agent-to-agent note. Can target a specific agent, channel, or broadcast to all agents.",
+            name: "call_complete",
+            description: "NEW (Audio Intelligence): Store what changed after a call ends.",
             inputSchema: {
                 type: "object",
+                required: ["call_id", "customer_id"],
                 properties: {
-                    from_agent_id: {
-                        type: "string",
-                        description: "Sending agent identifier",
-                    },
-                    to_agent_id: {
-                        type: "string",
-                        description: "Target agent (omit for broadcast)",
-                    },
-                    channel: {
-                        type: "string",
-                        description: "Topic channel name",
-                    },
-                    subject: {
-                        type: "string",
-                        description: "Note subject line",
-                    },
-                    content: {
-                        type: "string",
-                        description: "Note body content",
-                    },
-                    persistent: {
-                        type: "boolean",
-                        description: "Keep after reading?",
-                    },
+                    call_id: { type: "string" },
+                    customer_id: { type: "string" },
+                    new_memories: { type: "array" },
+                    sentiment_improved: { type: "boolean" },
+                    follow_up_required: { type: "boolean" },
                 },
-                required: ["from_agent_id", "content"],
             },
         },
         {
-            name: "converse",
-            description: "Send a message between agents in a threaded conversation.",
+            name: "audio_recall",
+            description: "NEW (Audio Intelligence): Search audio memories and get audio-backed citations.",
             inputSchema: {
                 type: "object",
+                required: ["customer_id"],
                 properties: {
-                    from_agent_id: {
+                    customer_id: { type: "string" },
+                    query: { type: "string" },
+                    filter_type: {
                         type: "string",
-                        description: "Sending agent identifier",
+                        enum: ["preference", "promise", "fact", "action_item", "all"],
                     },
-                    to_agent_id: {
-                        type: "string",
-                        description: "Receiving agent identifier",
-                    },
-                    thread_id: {
-                        type: "string",
-                        description: "Existing thread to reply to",
-                    },
-                    message_type: {
-                        type: "string",
-                        enum: ["request", "response", "broadcast", "error", "system"],
-                        description: "Type of message",
-                    },
-                    content: {
-                        type: "string",
-                        description: "Message body content",
-                    },
+                    top_k: { type: "number", default: 5 },
                 },
-                required: ["from_agent_id", "to_agent_id", "content"],
             },
         },
         {
-            name: "ingest_audio",
-            description: "Process an audio file (meeting recording, voice memo, etc.) into searchable memory via transcription.",
+            name: "sound_analyze",
+            description: "NEW (Audio Intelligence): Detect and index non-speech audio events.",
             inputSchema: {
                 type: "object",
+                required: ["audio_id"],
                 properties: {
-                    agent_id: {
-                        type: "string",
-                        description: "Agent to associate the memory with",
-                    },
-                    file_path: {
-                        type: "string",
-                        description: "Path to audio file on local machine",
-                    },
-                    tags: {
+                    audio_id: { type: "string" },
+                    detect_events: { type: "boolean" },
+                    search_for: { type: "array", items: { type: "string" } },
+                },
+            },
+        },
+        {
+            name: "music_analyze",
+            description: "NEW (Audio Intelligence): Extract tempo, structure, instrumentation, mood from music.",
+            inputSchema: {
+                type: "object",
+                required: ["audio_id"],
+                properties: {
+                    audio_id: { type: "string" },
+                    extract: {
                         type: "array",
-                        items: { type: "string" },
-                        description: "Tags for the transcription memory",
-                    },
-                    language: {
-                        type: "string",
-                        description: "ISO 639-1 language code (e.g. 'en', 'es')",
+                        items: {
+                            enum: ["structure", "tempo", "instruments", "energy_curve", "vocal_characteristics", "motifs"],
+                        },
                     },
                 },
-                required: ["agent_id", "file_path"],
             },
         },
         {
             name: "streaming_audio_ingest",
-            description: "Ingest an edge-device audio chunk (car, doorbell, wearable) into per-device streaming memory. Transcribes via Whisper large-v3, extracts entities and intent, indexes for recall. Idempotent — retries never double-process.",
+            description: "Ingest an edge-device audio chunk (car, doorbell, wearable) into per-device streaming memory. Whisper large-v3 transcription, entity + intent extraction, idempotent retries.",
             inputSchema: {
                 type: "object",
                 properties: {
-                    device_id: {
-                        type: "string",
-                        description: "Stable device identifier (e.g. 'dashcam-01')",
-                    },
-                    audio_base64: {
-                        type: "string",
-                        description: "Base64-encoded audio chunk (max ~25MB decoded)",
-                    },
-                    format: {
-                        type: "string",
-                        enum: ["wav", "opus", "pcm", "mp3"],
-                        description: "Audio format (default: wav)",
-                    },
-                    sample_rate: {
-                        type: "number",
-                        description: "Sample rate in Hz (default: 16000)",
-                    },
-                    duration_seconds: {
-                        type: "number",
-                        description: "Chunk duration in seconds if known",
-                    },
-                    idempotency_key: {
-                        type: "string",
-                        description: "chunk_<deviceId>_<timestamp>_<hash>. Auto-generated when omitted.",
-                    },
+                    device_id: { type: "string", description: "Stable device identifier (e.g. 'dashcam-01')" },
+                    audio_base64: { type: "string", description: "Base64-encoded audio chunk (max ~25MB decoded)" },
+                    format: { type: "string", enum: ["wav", "opus", "pcm", "mp3"], description: "Audio format (default wav)" },
+                    sample_rate: { type: "number", description: "Sample rate in Hz (default 16000)" },
+                    duration_seconds: { type: "number", description: "Chunk duration in seconds if known" },
+                    idempotency_key: { type: "string", description: "chunk_<deviceId>_<timestamp>_<hash>; auto-generated when omitted" },
                 },
                 required: ["device_id", "audio_base64"],
             },
@@ -412,531 +245,198 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             inputSchema: {
                 type: "object",
                 properties: {
-                    device_id: {
-                        type: "string",
-                        description: "Device identifier used during ingest",
-                    },
-                    query: {
-                        type: "string",
-                        description: "Natural-language query over that device's audio history",
-                    },
+                    device_id: { type: "string", description: "Device identifier used during ingest" },
+                    query: { type: "string", description: "Natural-language query over that device's audio history" },
                 },
                 required: ["device_id", "query"],
             },
         },
     ],
 }));
-// ---------------------------------------------------------------------------
-// Tool Call Handler
-// ---------------------------------------------------------------------------
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
     try {
-        switch (name) {
-            // -------------------------------------------------------------------
-            // remember
-            // -------------------------------------------------------------------
-            case "remember": {
-                const parsed = RememberSchema.parse(args);
-                const result = await apiCall({
-                    path: "/remember",
-                    method: "POST",
-                    body: {
-                        agent_id: parsed.agent_id,
-                        content: parsed.content,
-                        tags: parsed.tags,
-                        metadata: parsed.metadata,
-                        ttl_seconds: parsed.ttl_seconds,
-                    },
-                });
-                return {
-                    content: [
-                        {
-                            type: "text",
-                            text: JSON.stringify({
-                                status: "remembered",
-                                memory_id: result.id,
-                                content: parsed.content.substring(0, 200),
-                                agent_id: parsed.agent_id,
-                                tags: parsed.tags,
-                            }, null, 2),
-                        },
-                    ],
-                };
-            }
-            // -------------------------------------------------------------------
-            // recall
-            // -------------------------------------------------------------------
-            case "recall": {
-                const parsed = RecallSchema.parse(args);
-                const result = await apiCall({
-                    path: "/recall",
-                    method: "POST",
-                    body: {
-                        query: parsed.query,
-                        agent_id: parsed.agent_id,
-                        top_k: parsed.top_k,
-                        min_score: parsed.min_score,
-                        tags: parsed.tags,
-                        since: parsed.since,
-                        until: parsed.until,
-                    },
-                });
-                const memories = result.results ?? [];
-                return {
-                    content: [
-                        {
-                            type: "text",
-                            text: memories.length === 0
-                                ? "No matching memories found."
-                                : JSON.stringify({
-                                    count: memories.length,
-                                    query: parsed.query,
-                                    results: memories.map((m) => ({
-                                        id: m.id,
-                                        content: m.content,
-                                        score: m.score,
-                                        created_at: m.created_at,
-                                        tags: m.tags,
-                                    })),
-                                }, null, 2),
-                        },
-                    ],
-                };
-            }
-            // -------------------------------------------------------------------
-            // list_sessions
-            // -------------------------------------------------------------------
-            case "list_sessions": {
-                const parsed = ListSessionsSchema.parse(args);
-                const result = await apiCall({
-                    path: `/sessions?agent_id=${encodeURIComponent(parsed.agent_id)}&limit=${parsed.limit}&offset=${parsed.offset}`,
-                    method: "GET",
-                });
-                return {
-                    content: [
-                        {
-                            type: "text",
-                            text: JSON.stringify({
-                                agent_id: parsed.agent_id,
-                                total: result.total ?? result.sessions?.length ?? 0,
-                                sessions: result.sessions ?? [],
-                            }, null, 2),
-                        },
-                    ],
-                };
-            }
-            // -------------------------------------------------------------------
-            // create_session
-            // -------------------------------------------------------------------
-            case "create_session": {
-                const parsed = CreateSessionSchema.parse(args);
-                const result = await apiCall({
-                    path: "/sessions",
-                    method: "POST",
-                    body: {
-                        agent_id: parsed.agent_id,
-                        context: parsed.context,
-                        tags: parsed.tags,
-                    },
-                });
-                return {
-                    content: [
-                        {
-                            type: "text",
-                            text: JSON.stringify({
-                                status: "created",
-                                session_id: result.id,
-                                agent_id: parsed.agent_id,
-                                tags: parsed.tags,
-                            }, null, 2),
-                        },
-                    ],
-                };
-            }
-            // -------------------------------------------------------------------
-            // write_note
-            // -------------------------------------------------------------------
-            case "write_note": {
-                const parsed = WriteNoteSchema.parse(args);
-                const result = await apiCall({
-                    path: "/note",
-                    method: "POST",
-                    body: {
-                        from_agent_id: parsed.from_agent_id,
-                        to_agent_id: parsed.to_agent_id,
-                        channel: parsed.channel,
-                        subject: parsed.subject,
-                        content: parsed.content,
-                        persistent: parsed.persistent,
-                    },
-                });
-                return {
-                    content: [
-                        {
-                            type: "text",
-                            text: JSON.stringify({
-                                status: "written",
-                                note_id: result.id,
-                                from: parsed.from_agent_id,
-                                to: parsed.to_agent_id ?? "(broadcast)",
-                                subject: parsed.subject,
-                            }, null, 2),
-                        },
-                    ],
-                };
-            }
-            // -------------------------------------------------------------------
-            // converse
-            // -------------------------------------------------------------------
-            case "converse": {
-                const parsed = ConverseSchema.parse(args);
-                const result = await apiCall({
-                    path: "/converse",
-                    method: "POST",
-                    body: {
-                        from_agent_id: parsed.from_agent_id,
-                        to_agent_id: parsed.to_agent_id,
-                        thread_id: parsed.thread_id,
-                        message_type: parsed.message_type,
-                        content: parsed.content,
-                    },
-                });
-                return {
-                    content: [
-                        {
-                            type: "text",
-                            text: JSON.stringify({
-                                status: "sent",
-                                thread_id: result.thread_id,
-                                message_id: result.message_id,
-                                from: parsed.from_agent_id,
-                                to: parsed.to_agent_id,
-                            }, null, 2),
-                        },
-                    ],
-                };
-            }
-            // -------------------------------------------------------------------
-            // ingest_audio
-            // -------------------------------------------------------------------
-            case "ingest_audio": {
-                const parsed = IngestAudioSchema.parse(args);
-                // Send file path; server reads + processes the audio
-                const result = await apiCall({
-                    path: "/audio/ingest",
-                    method: "POST",
-                    body: {
-                        agent_id: parsed.agent_id,
-                        file_path: parsed.file_path,
-                        tags: parsed.tags,
-                        language: parsed.language,
-                    },
-                });
-                return {
-                    content: [
-                        {
-                            type: "text",
-                            text: JSON.stringify({
-                                status: "ingested",
-                                memory_id: result.memory_id,
-                                agent_id: parsed.agent_id,
-                                transcript_preview: result.transcript?.substring(0, 500) +
-                                    (result.transcript?.length > 500 ? "..." : ""),
-                            }, null, 2),
-                        },
-                    ],
-                };
-            }
-            // -------------------------------------------------------------------
-            // streaming_audio_ingest
-            // -------------------------------------------------------------------
-            case "streaming_audio_ingest": {
-                const parsed = StreamingIngestSchema.parse(args);
-                const ts = Date.now();
-                const hash = createHash("sha256")
-                    .update(parsed.audio_base64.slice(0, 2048))
-                    .digest("hex")
-                    .slice(0, 12);
-                const result = await apiCall({
-                    path: "/streaming-audio",
-                    baseUrl: config.streamingBaseUrl,
-                    method: "POST",
-                    body: {
-                        deviceId: parsed.device_id,
-                        timestamp: ts,
-                        audio: parsed.audio_base64,
-                        format: parsed.format,
-                        sampleRate: parsed.sample_rate,
-                        durationSeconds: parsed.duration_seconds,
-                        idempotencyKey: parsed.idempotency_key ??
-                            `chunk_${parsed.device_id}_${ts}_${hash}`,
-                    },
-                    timeoutMs: 120_000,
-                });
-                return {
-                    content: [
-                        {
-                            type: "text",
-                            text: JSON.stringify({
-                                status: result.persisted === false
-                                    ? "transcribed_but_persist_failed"
-                                    : "ingested",
-                                segment_id: result.segmentId,
-                                device_id: parsed.device_id,
-                                namespace: result.namespace,
-                                intent: result.intent,
-                                transcription_chars: result.transcriptionChars,
-                                summarized: result.summarized ?? false,
-                            }, null, 2),
-                        },
-                    ],
-                };
-            }
-            // -------------------------------------------------------------------
-            // streaming_audio_recall
-            // -------------------------------------------------------------------
-            case "streaming_audio_recall": {
-                const parsed = StreamingRecallSchema.parse(args);
-                const result = await apiCall({
-                    path: "/streaming-audio/query",
-                    baseUrl: config.streamingBaseUrl,
-                    method: "POST",
-                    body: { deviceId: parsed.device_id, query: parsed.query },
-                });
-                return {
-                    content: [
-                        {
-                            type: "text",
-                            text: !result.context && !(result.chunks ?? []).length
-                                ? `No matching streamed audio found for device '${parsed.device_id}'.`
-                                : JSON.stringify({
-                                    device_id: parsed.device_id,
-                                    context: result.context,
-                                    chunks: result.chunks ?? [],
-                                    sources: result.sources ?? [],
-                                }, null, 2),
-                        },
-                    ],
-                };
-            }
-            default:
-                throw new Error(`Unknown tool: ${name}`);
-        }
-    }
-    catch (err) {
-        if (err instanceof z.ZodError) {
+        if (name === "namespace") {
             return {
-                isError: true,
+                content: [{ type: "text", text: JSON.stringify({ namespace: NAMESPACE }, null, 2) }],
+            };
+        }
+        if (name === "remember") {
+            const { text, audio_url, file_url, title } = args;
+            if (!text && !audio_url && !file_url) {
+                throw new Error("Provide text, audio_url, or file_url");
+            }
+            const body = {};
+            if (text)
+                body.text = text;
+            if (audio_url)
+                body.audio_url = audio_url;
+            if (file_url)
+                body.file_url = file_url;
+            if (title)
+                body.title = title;
+            const result = await callBlueColumn("agent-remember", body);
+            return {
                 content: [
                     {
                         type: "text",
-                        text: `Validation error: ${err.errors
-                            .map((e) => `${e.path.join(".")}: ${e.message}`)
-                            .join("; ")}`,
+                        text: JSON.stringify({
+                            stored: true,
+                            session_id: result.session_id,
+                            title: result.title,
+                            summary: result.summary,
+                            action_items: result.action_items,
+                            key_topics: result.key_topics,
+                            chunk_count: result.chunk_count,
+                        }, null, 2),
                     },
                 ],
             };
         }
-        const message = err instanceof Error ? err.message : String(err);
+        if (name === "recall") {
+            const { q } = args;
+            const result = await callBlueColumn("agent-recall", { q });
+            return {
+                content: [
+                    {
+                        type: "text",
+                        text: JSON.stringify({
+                            answer: result.answer,
+                            sources: result.sources,
+                            tokens_used: result.tokens_used,
+                        }, null, 2),
+                    },
+                ],
+            };
+        }
+        if (name === "note") {
+            const { text, tags } = args;
+            const body = { text };
+            if (tags)
+                body.tags = tags;
+            const result = await callBlueColumn("agent-note", body);
+            return {
+                content: [
+                    {
+                        type: "text",
+                        text: JSON.stringify({
+                            stored: true,
+                            note_id: result.note_id,
+                            chunk_count: result.chunk_count,
+                            queryable: result.queryable,
+                        }, null, 2),
+                    },
+                ],
+            };
+        }
+        if (name === "audio_ingest") {
+            const { audio_url, source_type, customer_id, metadata } = args;
+            if (!audio_url)
+                throw new Error("Provide audio_url");
+            const result = await callAudioApi("/v1/audio/ingest", {
+                audio_url,
+                source_type: source_type || "voice_note",
+                customer_id,
+                metadata,
+            });
+            return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+        }
+        if (name === "call_prepare") {
+            const { customer_id, include } = args;
+            if (!customer_id)
+                throw new Error("Provide customer_id");
+            const result = await callAudioApi("/v1/calls/prepare", { customer_id, include });
+            return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+        }
+        if (name === "call_complete") {
+            const { call_id, customer_id, new_memories, sentiment_improved, follow_up_required } = args;
+            if (!call_id || !customer_id)
+                throw new Error("Provide call_id and customer_id");
+            const result = await callAudioApi("/v1/calls/complete", {
+                call_id,
+                customer_id,
+                new_memories,
+                sentiment_improved,
+                follow_up_required,
+            });
+            return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+        }
+        if (name === "audio_recall") {
+            const { customer_id, query, top_k } = args;
+            if (!customer_id)
+                throw new Error("Provide customer_id");
+            const result = await callAudioApi("/v1/memories/recall", {
+                query: query || "",
+                limit: top_k || 5,
+                namespace: NAMESPACE,
+            });
+            return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+        }
+        if (name === "sound_analyze") {
+            const { audio_id, detect_events, search_for } = args;
+            if (!audio_id)
+                throw new Error("Provide audio_id");
+            const result = await callAudioApi("/v1/sound/analyze", {
+                audio_id,
+                detect_events,
+                search_for,
+            });
+            return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+        }
+        if (name === "music_analyze") {
+            const { audio_id, extract } = args;
+            if (!audio_id)
+                throw new Error("Provide audio_id");
+            const result = await callAudioApi("/v1/music/analyze", { audio_id, extract });
+            return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+        }
+        if (name === "streaming_audio_ingest") {
+            const { device_id, audio_base64, format, sample_rate, duration_seconds, idempotency_key } = args;
+            if (!device_id || !audio_base64)
+                throw new Error("Provide device_id and audio_base64");
+            const ts = Date.now();
+            const hash = createHash("sha256")
+                .update(audio_base64.slice(0, 2048))
+                .digest("hex")
+                .slice(0, 12);
+            const result = await callStreamingApi("/streaming-audio", {
+                deviceId: device_id,
+                timestamp: ts,
+                audio: audio_base64,
+                format: format || "wav",
+                sampleRate: sample_rate,
+                durationSeconds: duration_seconds,
+                idempotencyKey: idempotency_key || `chunk_${device_id}_${ts}_${hash}`,
+            });
+            return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+        }
+        if (name === "streaming_audio_recall") {
+            const { device_id, query } = args;
+            if (!device_id || !query)
+                throw new Error("Provide device_id and query");
+            const result = await callStreamingApi("/streaming-audio/query", {
+                deviceId: device_id,
+                query,
+            });
+            return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+        }
+        throw new Error(`Unknown tool: ${name}`);
+    }
+    catch (error) {
         return {
-            isError: true,
             content: [
                 {
                     type: "text",
-                    text: `Error: ${message}`,
+                    text: `Error: ${error instanceof Error ? error.message : String(error)}`,
                 },
             ],
-        };
-    }
-});
-// ---------------------------------------------------------------------------
-// Resources (read-only access to memories, agents, health)
-// ---------------------------------------------------------------------------
-server.setRequestHandler(ListResourcesRequestSchema, async () => ({
-    resources: [
-        {
-            uri: "bluecolumn://health",
-            name: "API Health",
-            description: "Current health status of the BlueColumn API",
-            mimeType: "application/json",
-        },
-        {
-            uri: `bluecolumn://agent/${config.defaultAgentId ?? "{agent_id}"}`,
-            name: "Agent Details",
-            description: "Get details about a specific agent",
-            mimeType: "application/json",
-        },
-        {
-            uri: "bluecolumn://memory/{memory_id}",
-            name: "Single Memory",
-            description: "Fetch a single memory record by ID",
-            mimeType: "application/json",
-        },
-        {
-            uri: `bluecolumn://sessions/${config.defaultAgentId ?? "{agent_id}"}`,
-            name: "Session List",
-            description: "List sessions for an agent",
-            mimeType: "application/json",
-        },
-    ],
-    resourceTemplates: [
-        {
-            uriTemplate: "bluecolumn://memory/{memory_id}",
-            name: "Memory by ID",
-            description: "Fetch a single memory by its unique identifier",
-            mimeType: "application/json",
-        },
-        {
-            uriTemplate: "bluecolumn://agent/{agent_id}",
-            name: "Agent by ID",
-            description: "Get agent details and configuration",
-            mimeType: "application/json",
-        },
-        {
-            uriTemplate: "bluecolumn://sessions/{agent_id}",
-            name: "Sessions by Agent",
-            description: "List all sessions for a given agent",
-            mimeType: "application/json",
-        },
-    ],
-}));
-server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
-    const uri = request.params.uri;
-    try {
-        // Health
-        if (uri === "bluecolumn://health") {
-            const data = await apiCall({
-                path: "/health",
-                method: "GET",
-            });
-            return {
-                contents: [
-                    {
-                        uri,
-                        mimeType: "application/json",
-                        text: JSON.stringify(data, null, 2),
-                    },
-                ],
-            };
-        }
-        // Agent detail: bluecolumn://agent/{agent_id}
-        const agentMatch = uri.match(/^bluecolumn:\/\/agent\/(.+)$/);
-        if (agentMatch) {
-            const agentId = agentMatch[1];
-            const data = await apiCall({
-                path: `/agents/${encodeURIComponent(agentId)}`,
-                method: "GET",
-            });
-            return {
-                contents: [
-                    {
-                        uri,
-                        mimeType: "application/json",
-                        text: JSON.stringify(data, null, 2),
-                    },
-                ],
-            };
-        }
-        // Memory detail: bluecolumn://memory/{memory_id}
-        const memoryMatch = uri.match(/^bluecolumn:\/\/memory\/(.+)$/);
-        if (memoryMatch) {
-            const memoryId = memoryMatch[1];
-            const data = await apiCall({
-                path: `/memories/${encodeURIComponent(memoryId)}`,
-                method: "GET",
-            });
-            return {
-                contents: [
-                    {
-                        uri,
-                        mimeType: "application/json",
-                        text: JSON.stringify(data, null, 2),
-                    },
-                ],
-            };
-        }
-        // Sessions list: bluecolumn://sessions/{agent_id}
-        const sessionsMatch = uri.match(/^bluecolumn:\/\/sessions\/(.+)$/);
-        if (sessionsMatch) {
-            const agentId = sessionsMatch[1];
-            const data = await apiCall({
-                path: `/sessions?agent_id=${encodeURIComponent(agentId)}&limit=25`,
-                method: "GET",
-            });
-            return {
-                contents: [
-                    {
-                        uri,
-                        mimeType: "application/json",
-                        text: JSON.stringify(data, null, 2),
-                    },
-                ],
-            };
-        }
-        throw new Error(`Unknown resource: ${uri}`);
-    }
-    catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        return {
             isError: true,
-            contents: [
-                {
-                    uri,
-                    mimeType: "application/json",
-                    text: JSON.stringify({ error: message }, null, 2),
-                },
-            ],
         };
     }
 });
-// ---------------------------------------------------------------------------
-// Prompts (optional — suggests system prompt for agents)
-// ---------------------------------------------------------------------------
-server.setRequestHandler(ListPromptsRequestSchema, async () => ({
-    prompts: [
-        {
-            name: "bluecolumn_agent_guide",
-            description: "System prompt template that teaches agents how to use BlueColumn memory tools effectively",
-        },
-    ],
-}));
-server.setRequestHandler(GetPromptRequestSchema, async () => ({
-    messages: [
-        {
-            role: "system",
-            content: {
-                type: "text",
-                text: `You have access to the BlueColumn memory server. Use it to:
-
-1. **Remember important information** — When a user tells you something you should retain across conversations (preferences, facts, decisions), call \`remember\` to store it.
-
-2. **Recall past context** — When you need information from a previous conversation or earlier in the same conversation, call \`recall\` with a relevant query.
-
-3. **Manage sessions** — Use \`create_session\` for distinct interaction contexts and \`list_sessions\` to browse history.
-
-4. **Communicate with other agents** — Use \`write_note\` for simple messages and \`converse\` for threaded conversations between agents.
-
-5. **Process audio** — Use \`ingest_audio\` to transcribe and remember meeting recordings, voice memos, or any audio file.
-
-Always store key facts immediately when you learn them. Always search memory before answering questions that may depend on past context.`,
-            },
-        },
-    ],
-}));
-// ---------------------------------------------------------------------------
-// Startup
-// ---------------------------------------------------------------------------
 async function main() {
     const transport = new StdioServerTransport();
-    console.error(`BlueColumn MCP server starting...`);
-    console.error(`Connected to BlueColumn API at ${config.baseUrl}${config.defaultAgentId ? ` (default agent: ${config.defaultAgentId})` : ""}`);
-    console.error(`Available tools: remember, recall, list_sessions, create_session, write_note, converse, ingest_audio, streaming_audio_ingest, streaming_audio_recall`);
-    console.error(`Available resources: bluecolumn://health, bluecolumn://agent/{id}, bluecolumn://memory/{id}, bluecolumn://sessions/{id}`);
     await server.connect(transport);
+    console.error("BlueColumn MCP server running. Get your API key at https://bluecolumn.ai");
 }
-main().catch((err) => {
-    console.error("Fatal error:", err);
-    process.exit(1);
-});
-//# sourceMappingURL=index.js.map
+main().catch(console.error);
