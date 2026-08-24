@@ -1,42 +1,50 @@
 {
-  "name": "bluecolumn-mcp",
+  "name": "mcp-bluecolumn",
   "version": "1.1.0",
-  "mcpName": "io.github.bluecolumnconsulting-lgtm/bluecolumn-memory",
-  "description": "MCP server for BlueColumn — persistent semantic memory API for AI agents. Give any MCP-compatible agent the ability to remember, recall, and store observations across sessions. Now with Audio Intelligence: voice call continuity, sound-event indexing, and music metadata extraction.",
+  "description": "MCP server for BlueColumn — Memory Infrastructure for AI Agents. Give any MCP-compatible client persistent semantic memory.",
+  "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "bluecolumn-mcp": "dist/index.js"
+    "mcp-bluecolumn": "dist/index.js"
   },
-  "type": "module",
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc",
+    "prepublishOnly": "npm run build",
     "start": "node dist/index.js",
-    "dev": "node --loader ts-node/esm src/index.ts"
+    "dev": "npx tsx src/index.ts"
   },
   "keywords": [
     "mcp",
-    "ai",
-    "agents",
-    "memory",
+    "modelcontextprotocol",
     "bluecolumn",
+    "memory",
+    "ai",
+    "agent",
+    "semantic",
     "vector",
     "rag",
-    "pinecone",
-    "langchain",
-    "claude"
+    "claude",
+    "cursor",
+    "mcp-server"
   ],
-  "author": "BlueColumn <hello@bluecolumn.ai>",
   "license": "MIT",
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.0"
-  },
-  "devDependencies": {
-    "@types/node": "^25.6.0",
-    "typescript": "^5.0.0"
-  },
   "repository": {
     "type": "git",
-    "url": "https://github.com/bluecolumn/bluecolumn-mcp"
+    "url": "https://github.com/bluecolumn/mcp-bluecolumn"
   },
-  "homepage": "https://bluecolumn.ai"
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.6.0",
+    "cross-fetch": "^4.0.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "@types/node": "^20.12.0"
+  }
 }
