@@ -2,6 +2,7 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema, } from "@modelcontextprotocol/sdk/types.js";
+import { createHash } from "node:crypto";
 const BASE_URL = "https://xkjkwqbfvkswwdmbtndo.supabase.co/functions/v1";
 const NAMESPACE = process.env.BLUECOLUMN_NAMESPACE || "nl";
 const API_KEY = process.env.BLUECOLUMN_API_KEY;
@@ -42,7 +43,22 @@ async function callAudioApi(endpoint, body) {
     }
     return res.json();
 }
-const server = new Server({ name: "bluecolumn-mcp", version: "1.3.0" }, { capabilities: { tools: {} } });
+// Streaming gateway (v1.2.0) — POST /streaming-audio lives at the platform
+// root, not under /v1. Override with BLUECOLUMN_STREAMING_URL.
+const STREAMING_BASE_URL = process.env.BLUECOLUMN_STREAMING_URL || BASE_URL.replace(/\/v1$/, "");
+async function callStreamingApi(path, body) {
+    const res = await fetch(`${STREAMING_BASE_URL}${path}`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+        const err = await res.text();
+        throw new Error(`BlueColumn Streaming API error (${res.status}): ${err}`);
+    }
+    return res.json();
+}
+const server = new Server({ name: "bluecolumn-mcp", version: "1.4.0" }, { capabilities: { tools: {} } });
 // Compose a structured music-context text block from typed fields. The live
 // /agent-remember endpoint takes free text + audio_url, so we serialize the
 // music metadata into the stored text — it gets chunked, embedded, and comes
@@ -297,6 +313,34 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
                 },
             },
         },
+        {
+            name: "streaming_audio_ingest",
+            description: "Ingest an edge-device audio chunk (car, doorbell, wearable) into per-device streaming memory. Whisper large-v3 transcription, entity + intent extraction, idempotent retries.",
+            inputSchema: {
+                type: "object",
+                properties: {
+                    device_id: { type: "string", description: "Stable device identifier (e.g. 'dashcam-01')" },
+                    audio_base64: { type: "string", description: "Base64-encoded audio chunk (max ~25MB decoded)" },
+                    format: { type: "string", enum: ["wav", "opus", "pcm", "mp3"], description: "Audio format (default wav)" },
+                    sample_rate: { type: "number", description: "Sample rate in Hz (default 16000)" },
+                    duration_seconds: { type: "number", description: "Chunk duration in seconds if known" },
+                    idempotency_key: { type: "string", description: "chunk_<deviceId>_<timestamp>_<hash>; auto-generated when omitted" },
+                },
+                required: ["device_id", "audio_base64"],
+            },
+        },
+        {
+            name: "streaming_audio_recall",
+            description: "Recall over streamed device-audio memory for a specific device. Returns transcribed segments and session summaries ranked by relevance.",
+            inputSchema: {
+                type: "object",
+                properties: {
+                    device_id: { type: "string", description: "Device identifier used during ingest" },
+                    query: { type: "string", description: "Natural-language query over that device's audio history" },
+                },
+                required: ["device_id", "query"],
+            },
+        },
     ],
 }));
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
@@ -495,6 +539,36 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             if (!audio_id)
                 throw new Error("Provide audio_id");
             const result = await callAudioApi("/v1/music/analyze", { audio_id, extract });
+            return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+        }
+        if (name === "streaming_audio_ingest") {
+            const { device_id, audio_base64, format, sample_rate, duration_seconds, idempotency_key } = args;
+            if (!device_id || !audio_base64)
+                throw new Error("Provide device_id and audio_base64");
+            const ts = Date.now();
+            const hash = createHash("sha256")
+                .update(audio_base64.slice(0, 2048))
+                .digest("hex")
+                .slice(0, 12);
+            const result = await callStreamingApi("/streaming-audio", {
+                deviceId: device_id,
+                timestamp: ts,
+                audio: audio_base64,
+                format: format || "wav",
+                sampleRate: sample_rate,
+                durationSeconds: duration_seconds,
+                idempotencyKey: idempotency_key || `chunk_${device_id}_${ts}_${hash}`,
+            });
+            return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+        }
+        if (name === "streaming_audio_recall") {
+            const { device_id, query } = args;
+            if (!device_id || !query)
+                throw new Error("Provide device_id and query");
+            const result = await callStreamingApi("/streaming-audio/query", {
+                deviceId: device_id,
+                query,
+            });
             return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
         }
         throw new Error(`Unknown tool: ${name}`);

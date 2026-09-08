@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.4.0 — Music Memory tools (2026-09)
+
+- New tool `music_remember` — store a musical recording, practice session, or
+  lesson with rich musical context (instrument, key, tempo, technique tags,
+  chord progression, notes). Audio is transcribed via Whisper; structured
+  context is serialized into the stored text so recall comes back with full
+  musical understanding. Works today via the core memory API (`agent-remember`).
+- New tool `music_recall` — search stored musical content with musical filters
+  (instrument, technique_tags, style_tags). Filter hints are appended to the
+  query so recall scopes to music. Returns AI-synthesized answers + citations.
+
+## 1.3.0 — Package hardening (2026-09)
+
+- Registry metadata, packaging, and bin fixes.
+
 ## 1.2.0 — Streaming audio memory (2026-08-24)
 
 - New tool `streaming_audio_ingest` — POST /streaming-audio. Ingest edge-device

@@ -16,11 +16,63 @@ Give any MCP-compatible agent (Claude Desktop, Cursor, Windsurf, LangChain, Auto
 
 ## Tools
 
+### Core memory
+
 | Tool | Description |
 |---|---|
 | `remember` | Ingest text, audio, or documents into persistent memory |
 | `recall` | Query memory with natural language, get AI-synthesized answer + sources |
 | `note` | Store lightweight agent observations as searchable vectors |
+| `namespace` | Show the configured namespace |
+
+### Music Memory (new)
+
+| Tool | Description |
+|---|---|
+| `music_remember` | Store a musical recording, practice session, or lesson with rich musical context — instrument, key, tempo, technique tags, chord progression, notes. Audio is transcribed; the structured context is embedded alongside so a coach/teacher agent recalls it with full musical understanding |
+| `music_recall` | Search stored musical content with musical filters — instrument, technique, or style. E.g. "show me every take with barre chord issues" or "what did we practice in E minor last month" |
+
+### Audio Intelligence
+
+| Tool | Description |
+|---|---|
+| `audio_ingest` | Ingest calls, voice notes, podcasts, meetings, or music and extract semantic memory |
+| `audio_recall` | Search audio memories and get audio-backed citations |
+| `call_prepare` | Get memory context before a voice call starts |
+| `call_complete` | Store what changed after a call ends |
+| `sound_analyze` | Detect and index non-speech audio events |
+| `music_analyze` | Extract tempo, structure, instrumentation, mood from music |
+
+### Streaming audio memory
+
+| Tool | Description |
+|---|---|
+| `streaming_audio_ingest` | Ingest edge-device audio chunks (car, doorbell, wearable) into per-device streaming memory |
+| `streaming_audio_recall` | Recall over a device's streamed audio history |
+
+## Music Memory example
+
+Store a practice session:
+
+```
+music_remember {
+  "audio_url": "https://example.com/take3.mp3",
+  "title": "Week 3 practice — barre chords, Sep 7",
+  "instrument": "guitar",
+  "musical_key": "E minor",
+  "tempo_bpm": 92,
+  "technique_tags": ["barre-chords", "hammer-on"],
+  "style_tags": ["blues"],
+  "chord_progression": ["Em", "Am", "B7"],
+  "notes": "F-shape barre still buzzy on the B string; Fmaj7 subst worked well"
+}
+```
+
+Then recall it musically:
+
+```
+music_recall { "q": "which takes had barre chord issues?", "instrument": "guitar" }
+```
 
 ## Setup
 
