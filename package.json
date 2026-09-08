@@ -1,8 +1,8 @@
 {
   "name": "bluecolumn-mcp",
-  "version": "1.2.0",
+  "version": "1.4.0",
   "mcpName": "io.github.bluecolumnconsulting-lgtm/bluecolumn-memory",
-  "description": "MCP server for BlueColumn — persistent semantic memory API for AI agents. Give any MCP-compatible agent the ability to remember, recall, and store observations across sessions. Now with Audio Intelligence: voice call continuity, sound-event indexing, and music metadata extraction.",
+  "description": "MCP server for BlueColumn \u2014 persistent semantic memory API for AI agents. Remember, recall, and store observations across sessions. Audio Intelligence (calls, sound events, music) plus Music Memory: store practice recordings and lessons with instrument/key/tempo/technique/chord context and recall them musically.",
   "main": "dist/index.js",
   "bin": {
     "bluecolumn-mcp": "dist/index.js"
@@ -14,16 +14,20 @@
     "dev": "node --loader ts-node/esm src/index.ts"
   },
   "keywords": [
-    "mcp",
-    "ai",
     "agents",
-    "memory",
+    "ai",
+    "audio",
     "bluecolumn",
-    "vector",
-    "rag",
-    "pinecone",
+    "claude",
+    "guitar",
     "langchain",
-    "claude"
+    "mcp",
+    "memory",
+    "music",
+    "music-memory",
+    "pinecone",
+    "rag",
+    "vector"
   ],
   "author": "BlueColumn <hello@bluecolumn.ai>",
   "license": "MIT",

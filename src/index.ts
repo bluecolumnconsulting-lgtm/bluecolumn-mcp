@@ -73,9 +73,33 @@ async function callStreamingApi(path: string, body: Record<string, unknown>) {
 }
 
 const server = new Server(
-  { name: "bluecolumn-mcp", version: "1.2.0" },
+  { name: "bluecolumn-mcp", version: "1.4.0" },
   { capabilities: { tools: {} } }
 );
+
+// Compose a structured music-context text block from typed fields. The live
+// /agent-remember endpoint takes free text + audio_url, so we serialize the
+// music metadata into the stored text — it gets chunked, embedded, and comes
+// back through recall with full context attached.
+function composeMusicContext(a: {
+  instrument?: string;
+  technique_tags?: string[];
+  style_tags?: string[];
+  musical_key?: string;
+  tempo_bpm?: number;
+  chord_progression?: string[];
+  notes?: string;
+}): string {
+  const parts: string[] = [];
+  if (a.instrument) parts.push(`Instrument: ${a.instrument}`);
+  if (a.musical_key) parts.push(`Key: ${a.musical_key}`);
+  if (a.tempo_bpm) parts.push(`Tempo: ${a.tempo_bpm} BPM`);
+  if (a.technique_tags?.length) parts.push(`Techniques: ${a.technique_tags.join(", ")}`);
+  if (a.style_tags?.length) parts.push(`Styles: ${a.style_tags.join(", ")}`);
+  if (a.chord_progression?.length) parts.push(`Chord progression: ${a.chord_progression.join(" → ")}`);
+  if (a.notes) parts.push(`Notes: ${a.notes}`);
+  return parts.length ? `MUSIC CONTEXT — ${parts.join(" | ")}` : "";
+}
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
@@ -125,6 +149,76 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           q: {
             type: "string",
             description: "Natural language query to search memory",
+          },
+        },
+      },
+    },
+    {
+      name: "music_remember",
+      description:
+        "NEW (Music Memory): Store a musical recording, practice session, or lesson with rich musical context — instrument, key, tempo, technique tags, chord progression, and free-form notes — into BlueColumn. Audio is transcribed; the structured context is embedded alongside so a coach/teacher agent can recall it with full musical understanding. Works today via the core memory API; dedicated music endpoints arrive with the music release.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          audio_url: {
+            type: "string",
+            description: "URL to the recording (WAV/MP3/etc). Transcribed via Whisper.",
+          },
+          text: {
+            type: "string",
+            description: "Free-form description when there is no recording (e.g. notation or a lesson summary)",
+          },
+          title: {
+            type: "string",
+            description: "Title for this memory, include date for best recall (e.g. 'Week 3 practice — barre chords, Sep 7')",
+          },
+          instrument: { type: "string", description: "e.g. guitar, piano, bass, drums" },
+          musical_key: { type: "string", description: "e.g. 'E minor', 'Bb major'" },
+          tempo_bpm: { type: "number", description: "e.g. 92" },
+          technique_tags: {
+            type: "array",
+            items: { type: "string" },
+            description: "e.g. ['barre-chords', 'hammer-on', 'alternate-picking']",
+          },
+          style_tags: {
+            type: "array",
+            items: { type: "string" },
+            description: "e.g. ['blues', 'fingerstyle']",
+          },
+          chord_progression: {
+            type: "array",
+            items: { type: "string" },
+            description: "Ordered chords, e.g. ['Am', 'F', 'C', 'G']",
+          },
+          notes: {
+            type: "string",
+            description: "Teacher/coach notes — what to watch for, what improved, what to drill next",
+          },
+        },
+      },
+    },
+    {
+      name: "music_recall",
+      description:
+        "NEW (Music Memory): Search stored musical content with musical filters. Returns AI-synthesized answers with citations. Filter by instrument, techniques, or style — e.g. 'show me every take with barre chord issues' or 'what did we practice in E minor last month'.",
+      inputSchema: {
+        type: "object",
+        required: ["q"],
+        properties: {
+          q: {
+            type: "string",
+            description: "Natural language query about stored music/practice content",
+          },
+          instrument: { type: "string", description: "Filter: instrument, e.g. guitar" },
+          technique_tags: {
+            type: "array",
+            items: { type: "string" },
+            description: "Filter: techniques, e.g. ['bend', 'travis-picking']",
+          },
+          style_tags: {
+            type: "array",
+            items: { type: "string" },
+            description: "Filter: styles, e.g. ['blues']",
           },
         },
       },
@@ -336,6 +430,80 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const { q } = args as { q: string };
       const result = await callBlueColumn("agent-recall", { q });
 
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              answer: result.answer,
+              sources: result.sources,
+              tokens_used: result.tokens_used,
+            }, null, 2),
+          },
+        ],
+      };
+    }
+
+    if (name === "music_remember") {
+      const a = args as {
+        audio_url?: string;
+        text?: string;
+        title?: string;
+        instrument?: string;
+        musical_key?: string;
+        tempo_bpm?: number;
+        technique_tags?: string[];
+        style_tags?: string[];
+        chord_progression?: string[];
+        notes?: string;
+      };
+      if (!a.audio_url && !a.text) {
+        throw new Error("Provide audio_url (a recording) or text (notation/lesson summary)");
+      }
+      const context = composeMusicContext(a);
+      const body: Record<string, unknown> = {};
+      if (a.audio_url) body.audio_url = a.audio_url;
+      // Merge structured context into the text payload so it is embedded and recallable.
+      const merged = [context, a.text].filter(Boolean).join("\n\n");
+      if (merged) body.text = merged;
+      if (a.title) body.title = a.title;
+
+      const result = await callBlueColumn("agent-remember", body);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              stored: true,
+              session_id: result.session_id,
+              title: result.title,
+              summary: result.summary,
+              action_items: result.action_items,
+              key_topics: result.key_topics,
+              chunk_count: result.chunk_count,
+              music_context_captured: Boolean(context),
+            }, null, 2),
+          },
+        ],
+      };
+    }
+
+    if (name === "music_recall") {
+      const a = args as {
+        q: string;
+        instrument?: string;
+        technique_tags?: string[];
+        style_tags?: string[];
+      };
+      if (!a.q) throw new Error("Provide q");
+      // Semantic filter hints — appended to the query so recall scopes to music.
+      const hints: string[] = [];
+      if (a.instrument) hints.push(`instrument: ${a.instrument}`);
+      if (a.technique_tags?.length) hints.push(`techniques: ${a.technique_tags.join(", ")}`);
+      if (a.style_tags?.length) hints.push(`styles: ${a.style_tags.join(", ")}`);
+      const q = hints.length ? `${a.q} (${hints.join("; ")})` : a.q;
+
+      const result = await callBlueColumn("agent-recall", { q });
       return {
         content: [
           {
