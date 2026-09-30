@@ -8,7 +8,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { createHash } from "node:crypto";
 
-const BASE_URL = "https://xkjkwqbfvkswwdmbtndo.supabase.co/functions/v1";
+const BASE_URL = "https://api.bluecolumn.ai";
 const NAMESPACE = process.env.BLUECOLUMN_NAMESPACE || "nl";
 const API_KEY = process.env.BLUECOLUMN_API_KEY;
 
@@ -39,7 +39,7 @@ async function callBlueColumn(endpoint: string, body: Record<string, unknown>) {
 // Audio-intelligence layer (v1.1.0) — routed to the BlueColumn API. Override the
 // target with BLUECOLUMN_API_URL (defaults to the local FastAPI backend, which now
 // serves /v1/audio/*, /v1/calls/*, /v1/sound/*, /v1/music/*).
-const AUDIO_API_BASE = process.env.BLUECOLUMN_API_URL || "http://localhost:8000";
+const AUDIO_API_BASE = process.env.BLUECOLUMN_API_URL || "https://api.bluecolumn.ai";
 
 async function callAudioApi(endpoint: string, body: Record<string, unknown>) {
   const res = await fetch(`${AUDIO_API_BASE}${endpoint}`, {
@@ -57,7 +57,7 @@ async function callAudioApi(endpoint: string, body: Record<string, unknown>) {
 // Streaming gateway (v1.2.0) — POST /streaming-audio lives at the platform
 // root, not under /v1. Override with BLUECOLUMN_STREAMING_URL.
 const STREAMING_BASE_URL =
-  process.env.BLUECOLUMN_STREAMING_URL || BASE_URL.replace(/\/v1$/, "");
+  process.env.BLUECOLUMN_STREAMING_URL || "https://api.bluecolumn.ai";
 
 async function callStreamingApi(path: string, body: Record<string, unknown>) {
   const res = await fetch(`${STREAMING_BASE_URL}${path}`, {
@@ -73,7 +73,7 @@ async function callStreamingApi(path: string, body: Record<string, unknown>) {
 }
 
 const server = new Server(
-  { name: "bluecolumn-mcp", version: "1.4.0" },
+  { name: "bluecolumn-mcp", version: "1.4.1" },
   { capabilities: { tools: {} } }
 );
 
@@ -246,17 +246,19 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "audio_ingest",
       description:
-        "NEW (Audio Intelligence): Ingest audio (calls, voice notes, podcasts, music) and extract semantic memory using the audio-intelligence layer. Requires BLUECOLUMN_API_URL to point at the BlueColumn API.",
+        "Ingest audio (calls, voice notes, podcasts, music) into BlueColumn memory. The audio URL is transcribed via Whisper and indexed with optional context.",
       inputSchema: {
         type: "object",
-        required: ["audio_url", "source_type", "customer_id"],
+        required: ["audio_url"],
         properties: {
-          audio_url: { type: "string", description: "URL of the audio file" },
+          audio_url: { type: "string", description: "URL of the audio file (WAV/MP3/etc)" },
           source_type: {
             type: "string",
             enum: ["call", "voice_note", "podcast", "meeting", "music", "environmental"],
           },
           customer_id: { type: "string" },
+          title: { type: "string" },
+          text: { type: "string", description: "Optional context to store alongside the transcript" },
           metadata: { type: "object" },
         },
       },
@@ -282,29 +284,29 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "call_complete",
       description:
-        "NEW (Audio Intelligence): Store what changed after a call ends.",
+        "Store what changed after a call ends: the transcript is analyzed into promises, action items, and relationship updates.",
       inputSchema: {
         type: "object",
-        required: ["call_id", "customer_id"],
+        required: ["customer_id", "transcript"],
         properties: {
-          call_id: { type: "string" },
           customer_id: { type: "string" },
-          new_memories: { type: "array" },
-          sentiment_improved: { type: "boolean" },
-          follow_up_required: { type: "boolean" },
+          transcript: { type: "string", description: "Text of the call that just ended" },
+          notes: { type: "string" },
+          duration_seconds: { type: "number" },
+          audio_id: { type: "string" },
         },
       },
     },
     {
       name: "audio_recall",
       description:
-        "NEW (Audio Intelligence): Search audio memories and get audio-backed citations.",
+        "Search audio memories and get audio-backed citations.",
       inputSchema: {
         type: "object",
-        required: ["customer_id"],
+        required: ["q"],
         properties: {
-          customer_id: { type: "string" },
-          query: { type: "string" },
+          q: { type: "string", description: "Natural language query" },
+          customer_id: { type: "string", description: "Optional filter appended to the query" },
           filter_type: {
             type: "string",
             enum: ["preference", "promise", "fact", "action_item", "all"],
@@ -406,7 +408,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       if (file_url) body.file_url = file_url;
       if (title) body.title = title;
 
-      const result = await callBlueColumn("agent-remember", body);
+      const result = await callBlueColumn("remember", body);
 
       return {
         content: [
@@ -428,7 +430,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     if (name === "recall") {
       const { q } = args as { q: string };
-      const result = await callBlueColumn("agent-recall", { q });
+      const result = await callBlueColumn("recall", { q });
 
       return {
         content: [
@@ -468,7 +470,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       if (merged) body.text = merged;
       if (a.title) body.title = a.title;
 
-      const result = await callBlueColumn("agent-remember", body);
+      const result = await callBlueColumn("remember", body);
       return {
         content: [
           {
@@ -503,7 +505,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       if (a.style_tags?.length) hints.push(`styles: ${a.style_tags.join(", ")}`);
       const q = hints.length ? `${a.q} (${hints.join("; ")})` : a.q;
 
-      const result = await callBlueColumn("agent-recall", { q });
+      const result = await callBlueColumn("recall", { q });
       return {
         content: [
           {
@@ -523,7 +525,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const body: Record<string, unknown> = { text };
       if (tags) body.tags = tags;
 
-      const result = await callBlueColumn("agent-note", body);
+      const result = await callBlueColumn("note", body);
 
       return {
         content: [
@@ -541,18 +543,24 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     if (name === "audio_ingest") {
-      const { audio_url, source_type, customer_id, metadata } = args as {
+      const { audio_url, source_type, customer_id, title, text, metadata } = args as {
         audio_url: string;
         source_type?: string;
         customer_id?: string;
+        title?: string;
+        text?: string;
         metadata?: Record<string, unknown>;
       };
       if (!audio_url) throw new Error("Provide audio_url");
-      const result = await callAudioApi("/v1/audio/ingest", {
+      const parts: string[] = [];
+      if (source_type) parts.push(`source_type: ${source_type}`);
+      if (customer_id) parts.push(`customer_id: ${customer_id}`);
+      if (metadata) parts.push(`metadata: ${JSON.stringify(metadata)}`);
+      if (text) parts.push(text);
+      const result = await callBlueColumn("remember", {
         audio_url,
-        source_type: source_type || "voice_note",
-        customer_id,
-        metadata,
+        ...(parts.length ? { text: parts.join("\n") } : {}),
+        ...(title ? { title } : {}),
       });
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     }
@@ -565,36 +573,37 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     if (name === "call_complete") {
-      const { call_id, customer_id, new_memories, sentiment_improved, follow_up_required } = args as {
-        call_id: string;
+      const { customer_id, transcript, notes, duration_seconds, audio_id } = args as {
         customer_id: string;
-        new_memories?: unknown[];
-        sentiment_improved?: boolean;
-        follow_up_required?: boolean;
+        transcript: string;
+        notes?: string;
+        duration_seconds?: number;
+        audio_id?: string;
       };
-      if (!call_id || !customer_id) throw new Error("Provide call_id and customer_id");
+      if (!customer_id || !transcript) throw new Error("Provide customer_id and transcript");
       const result = await callAudioApi("/v1/calls/complete", {
-        call_id,
         customer_id,
-        new_memories,
-        sentiment_improved,
-        follow_up_required,
+        transcript,
+        ...(notes ? { notes } : {}),
+        ...(duration_seconds != null ? { duration_seconds } : {}),
+        ...(audio_id ? { audio_id } : {}),
       });
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     }
 
     if (name === "audio_recall") {
-      const { customer_id, query, top_k } = args as {
-        customer_id: string;
-        query?: string;
+      const { q, customer_id, filter_type, top_k } = args as {
+        q: string;
+        customer_id?: string;
+        filter_type?: string;
         top_k?: number;
       };
-      if (!customer_id) throw new Error("Provide customer_id");
-      const result = await callAudioApi("/v1/memories/recall", {
-        query: query || "",
-        limit: top_k || 5,
-        namespace: NAMESPACE,
-      });
+      if (!q) throw new Error("Provide q");
+      const hints: string[] = [];
+      if (customer_id) hints.push(`customer_id: ${customer_id}`);
+      if (filter_type && filter_type !== "all") hints.push(`type: ${filter_type}`);
+      const query = hints.length ? `${q} (${hints.join("; ")})` : q;
+      const result = await callBlueColumn("recall", { q: query, ...(top_k ? { top_k } : {}) });
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     }
 
